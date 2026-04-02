@@ -5,6 +5,8 @@ import time
 import torch
 import torch.nn.functional as F
 
+from accelerate import cpu_offload
+
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.models.embeddings import get_2d_rotary_pos_embed
 
@@ -26,7 +28,7 @@ class PixelFlowPipeline:
         self.head_dim = transformer.attention_head_dim
         self.num_stages = scheduler.num_stages
 
-        self.text_encoder = text_encoder
+        self.text_encoder = cpu_offload(text_encoder, "cuda") if text_encoder is not None else None
         self.tokenizer = tokenizer
         self.max_token_length = max_token_length
 
@@ -213,6 +215,7 @@ class PixelFlowPipeline:
                 embed_dim=self.head_dim,
                 crops_coords=((0, 0), (latents.shape[-1] // self.patch_size, latents.shape[-1] // self.patch_size)),
                 grid_size=(latents.shape[-1] // self.patch_size, latents.shape[-1] // self.patch_size),
+                output_type="pt"
             )
             rope_pos = torch.stack(pos_embed, -1)
 

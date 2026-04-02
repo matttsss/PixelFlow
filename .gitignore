@@ -1,5 +1,6 @@
 /dataset/
 # output dir
+/models/*
 /output
 /ckpt_*
 /exp0*/
@@ -16,6 +17,7 @@ build/
 dist/
 wheels/
 *.egg-info/
+uv.lock
 
 # pytorch/python/numpy formats
 *.pth
