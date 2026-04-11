@@ -8,15 +8,22 @@ dependencies = [
     "accelerate>=1.13.0",
     "diffusers>=0.37.0",
     "einops>=0.8.2",
+    "huggingface-hub",
     "omegaconf>=2.3.0",
     "pandas>=3.0.2",
     "pyarrow>=23.0.1",
+    "torch",
     "torchdiffeq==0.2.4",
+    "torchvision",
     "transformers>=5.3.0",
 ]
 
-[tool.setuptools]
-packages = ["pixelflow"]
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pixelflow*"]
 
 [dependency-groups]
 dev = [
