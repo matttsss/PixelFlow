@@ -3,15 +3,11 @@ import argparse
 from PIL import Image
 import gradio as gr
 from imagenet_en_cn import IMAGENET_1K_CLASSES
-from omegaconf import OmegaConf
 
 import torch
-from transformers import T5EncoderModel, AutoTokenizer
 
-from pixelflow.scheduling_pixelflow import PixelFlowScheduler
-from pixelflow.pipeline_pixelflow import PixelFlowPipeline
-from pixelflow.utils import config as config_utils
 from pixelflow.utils.misc import seed_everything
+from pixelflow.pipeline_pixelflow import PixelFlowPipeline
 
 
 parser = argparse.ArgumentParser(description='Gradio Demo', add_help=False)
@@ -23,37 +19,16 @@ local_rank = 0
 device = torch.device(f"cuda:{local_rank}")
 torch.cuda.set_device(device)
 
-output_dir = args.checkpoint
+pipeline = PixelFlowPipeline.from_pretrained(
+    args.checkpoint, local_files_only=True, text_cond=not args.class_cond, dtype=torch.bfloat16, device=device
+)
+
 if args.class_cond:
-    config = OmegaConf.load(f"{output_dir}/config.yaml")
-    model = config_utils.instantiate_from_config(config.model).to(device)
-    print(f"Num of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    ckpt = torch.load(f"{output_dir}/model.pt", map_location="cpu", weights_only=True)
-    text_encoder = None
-    tokenizer = None
     resolution = 256
     NUM_EXAMPLES = 4
 else:
-    config = OmegaConf.load(f"{output_dir}/config.yaml")
-    model = config_utils.instantiate_from_config(config.model).to(device)
-    print(f"Num of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    ckpt = torch.load(f"{output_dir}/model.pt", map_location="cpu", weights_only=True)
-    text_encoder = T5EncoderModel.from_pretrained("google/flan-t5-xl").to(device)
-    tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-xl")
     resolution = 1024
     NUM_EXAMPLES = 1
-model.load_state_dict(ckpt, strict=True)
-model.eval()
-
-scheduler = PixelFlowScheduler(config.scheduler.num_train_timesteps, num_stages=config.scheduler.num_stages, gamma=-1/3)
-
-pipeline = PixelFlowPipeline(
-    scheduler,
-    model,
-    text_encoder=text_encoder,
-    tokenizer=tokenizer,
-    max_token_length=512,
-)
 
 def infer(use_ode_dopri5, noise_shift, cfg_scale, class_label, seed, *num_steps_per_stage):
     seed_everything(seed)
@@ -94,7 +69,7 @@ with gr.Blocks() as demo:
                     noise_shift = gr.Slider(minimum=1.0, maximum=100.0, step=1, value=1.0, label='Noise Shift')
                     cfg_scale = gr.Slider(minimum=1, maximum=25, step=0.1, value=4.0, label='Classifier-free Guidance Scale')
                     num_steps_per_stage = []
-                    for stage_idx in range(config.scheduler.num_stages):
+                    for stage_idx in range(pipeline.scheduler.num_stages):
                         num_steps = gr.Slider(minimum=1, maximum=100, step=1, value=10, label=f'Num Inference Steps (Stage {stage_idx})')
                         num_steps_per_stage.append(num_steps)
                     seed = gr.Slider(minimum=0, maximum=1000, step=1, value=42, label='Seed')

@@ -5,13 +5,21 @@ import time
 import torch
 import torch.nn.functional as F
 
+import json
+from omegaconf import OmegaConf
+from pathlib import Path
+from pixelflow.utils import config as config_utils
+from pixelflow.scheduling_pixelflow import PixelFlowScheduler
+
 from accelerate import cpu_offload
 
+from huggingface_hub import PyTorchModelHubMixin
+from transformers import T5EncoderModel, AutoTokenizer
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.models.embeddings import get_2d_rotary_pos_embed
 
 
-class PixelFlowPipeline:
+class PixelFlowPipeline(PyTorchModelHubMixin):
     def __init__(
         self,
         scheduler,
@@ -277,3 +285,43 @@ class PixelFlowPipeline:
     @property
     def do_classifier_free_guidance(self):
         return self._guidance_scale > 0
+    
+    # ---------- save ----------
+    def _save_pretrained(self, save_directory: Path, **kwargs):
+        save_directory = Path(save_directory)
+        save_directory.mkdir(parents=True, exist_ok=True)
+
+        torch.save(self.state_dict(), save_directory / "pytorch_model.bin")
+        (save_directory / "config.json").write_text(
+            json.dumps(self.get_config(), indent=2)
+        )
+
+    # ---------- load ----------
+    @classmethod
+    def _from_pretrained(cls, model_id, **kwargs):
+        device = kwargs.get("device", "cpu")
+        dtype = kwargs.get("dtype", torch.float32)
+
+        config = OmegaConf.load(f"{model_id}/config.yaml")
+        model = config_utils.instantiate_from_config(config.model)
+
+        ckpt = torch.load(f"{model_id}/model.pt", map_location="cpu", weights_only=True)
+        
+        model.load_state_dict(ckpt, strict=True)
+        model.eval()
+        model.to(device=device, dtype=dtype)
+
+        if kwargs.get("text_cond", False):
+            text_encoder = T5EncoderModel.from_pretrained("google/flan-t5-xl").to(device=device, dtype=dtype)
+            tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-xl")
+        else:
+            text_encoder = None
+            tokenizer = None
+        
+        return cls(
+            scheduler=PixelFlowScheduler(config.scheduler.num_train_timesteps, num_stages=config.scheduler.num_stages, gamma=-1/3),
+            transformer=model,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            max_token_length=config.get("max_token_length", 512),
+        )
