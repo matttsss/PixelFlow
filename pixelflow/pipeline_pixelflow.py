@@ -132,13 +132,10 @@ class PixelFlowPipeline(PyTorchModelHubMixin):
             negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
             negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len_neg, -1)
             negative_prompt_attention_mask = negative_prompt_attention_mask.view(bs_embed, -1).repeat(num_images_per_prompt, 1)
-        else:
-            negative_prompt_embeds = None
-            negative_prompt_attention_mask = None
 
-        # Concatenate negative and positive embeddings and their masks
-        prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-        prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask], dim=0)
+            # Concatenate negative and positive embeddings and their masks
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+            prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask], dim=0)
 
         return prompt_embeds, prompt_attention_mask
 
