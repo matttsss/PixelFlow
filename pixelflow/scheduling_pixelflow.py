@@ -19,11 +19,12 @@ class PixelFlowScheduler:
 
         self.stage_range = [x / num_stages for x in range(num_stages + 1)]
 
-        self.original_start_t = dict()
-        self.start_t, self.end_t = dict(), dict()
-        self.t_window_per_stage = dict()
-        self.Timesteps_per_stage = dict()
-        stage_distance = list()
+        self.original_start_t = torch.zeros(num_stages, dtype=torch.float64)
+        self.start_t = torch.zeros(num_stages, dtype=torch.float64)
+        self.end_t = torch.zeros(num_stages, dtype=torch.float64)
+        self.t_window_per_stage = torch.empty((num_stages, num_train_timesteps), dtype=torch.float64)
+        self.Timesteps_per_stage = torch.empty((num_stages, num_train_timesteps), dtype=torch.float64)
+        stage_distance = torch.empty(num_stages, dtype=torch.float64)
 
         # stage_idx = 0: min t, min resolution, most noisy
         # stage_idx = num_stages - 1 : max t, max resolution, most clear
@@ -41,19 +42,19 @@ class PixelFlowScheduler:
 
             self.start_t[stage_idx] = start_t
             self.end_t[stage_idx] = end_t
-            stage_distance.append(end_t - start_t)
+            stage_distance[stage_idx] = end_t - start_t
 
-        total_stage_distance = sum(stage_distance)
+        total_stage_distance = stage_distance.sum().item()
+        stage_distance_cumsum = torch.cumsum(stage_distance, dim=0)
         t_within_stage = torch.linspace(0, 1, num_train_timesteps + 1, dtype=torch.float64)[:-1]
+        self.t_window_per_stage[:] = t_within_stage
 
         for stage_idx in range(num_stages):
-            start_ratio = 0.0 if stage_idx == 0 else sum(stage_distance[:stage_idx]) / total_stage_distance
-            end_ratio = 1.0 if stage_idx == num_stages - 1 else sum(stage_distance[:stage_idx + 1]) / total_stage_distance
+            start_ratio = 0.0 if stage_idx == 0 else (stage_distance_cumsum[stage_idx - 1].item() / total_stage_distance)
+            end_ratio = 1.0 if stage_idx == num_stages - 1 else (stage_distance_cumsum[stage_idx].item() / total_stage_distance)
 
             Timestep_start = self.Timesteps[int(num_train_timesteps * start_ratio)]
             Timestep_end = self.Timesteps[min(int(num_train_timesteps * end_ratio), num_train_timesteps - 1)]
-
-            self.t_window_per_stage[stage_idx] = t_within_stage
 
             if stage_idx == num_stages - 1:
                 self.Timesteps_per_stage[stage_idx] = torch.linspace(Timestep_start.item(), Timestep_end.item(), num_train_timesteps, dtype=torch.float64)
