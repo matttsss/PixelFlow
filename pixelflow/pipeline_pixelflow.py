@@ -200,7 +200,7 @@ class PixelFlowPipeline(PyTorchModelHubMixin):
             stage_start = time.time()
             # Set the number of inference steps for the current stage
             self.scheduler.set_timesteps(num_inference_steps[stage_idx], stage_idx, device=device, shift=shift)
-            Timesteps = self.scheduler.Timesteps
+            timesteps = self.scheduler.timesteps
 
             if stage_idx > 0:
                 height, width = height * 2, width * 2
@@ -229,14 +229,14 @@ class PixelFlowPipeline(PyTorchModelHubMixin):
                 model_kwargs = dict(class_labels=prompt_embeds, cfg_scale=self.guidance_scale(None, stage_idx), latent_size=size_tensor, pos_embed=rope_pos)
                 if stage_idx == 0:
                     latents = torch.cat([latents] * 2)
-                stage_T_start = self.scheduler.Timesteps_per_stage[stage_idx][0].item()
-                stage_T_end = self.scheduler.Timesteps_per_stage[stage_idx][-1].item()
+                stage_T_start = self.scheduler.timesteps_per_stage[stage_idx][0].item()
+                stage_T_end = self.scheduler.timesteps_per_stage[stage_idx][-1].item()
                 latents = sample_fn(latents, self.transformer.c2i_forward_cfg_torchdiffq, stage_T_start, stage_T_end, **model_kwargs)[-1]
                 if stage_idx == self.num_stages - 1:
                     latents = latents[:latents.shape[0] // 2]
             else:
                 # euler
-                for T in Timesteps:
+                for T in timesteps:
                     latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                     timestep = T.expand(latent_model_input.shape[0]).to(latent_model_input.dtype)
                     if self.class_cond:

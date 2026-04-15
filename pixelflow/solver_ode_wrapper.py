@@ -22,7 +22,7 @@ class ODE:
         self.rtol = rtol
         self.sampler_type = sampler_type
 
-    def time_linear_to_Timesteps(self, t, t_start, t_end, T_start, T_end):
+    def time_linear_to_timesteps(self, t, t_start, t_end, T_start, T_end):
         # T = k * t + b
         k = (T_end - T_start) / (t_end - t_start)
         b = T_start - t_start * k
@@ -32,7 +32,7 @@ class ODE:
         device = x[0].device if isinstance(x, tuple) else x.device
         def _fn(t, x):
             t = torch.ones(x[0].size(0)).to(device) * t if isinstance(x, tuple) else torch.ones(x.size(0)).to(device) * t
-            model_output = model(x, self.time_linear_to_Timesteps(t, 0, 1, T_start, T_end), **model_kwargs)
+            model_output = model(x, self.time_linear_to_timesteps(t, 0, 1, T_start, T_end), **model_kwargs)
             assert model_output.shape == x.shape, "Output shape from ODE solver must match input shape"
             return model_output
 

@@ -51,8 +51,8 @@ def collate_fn(examples, config, noise_scheduler_copy):
     for stage_idx in range(config.scheduler.num_stages):
         corrected_stage_idx = config.scheduler.num_stages - stage_idx - 1
         stage_select_indices = timesteps[stage_indices == corrected_stage_idx]
-        Timesteps = noise_scheduler_copy.Timesteps_per_stage[corrected_stage_idx][stage_select_indices].float()
-        batch_size_select = Timesteps.shape[0]
+        timesteps = noise_scheduler_copy.timesteps_per_stage[corrected_stage_idx][stage_select_indices].float()
+        batch_size_select = timesteps.shape[0]
         pixel_values_select = pixel_values[stage_indices == corrected_stage_idx]
         input_ids_select = [input_ids[i] for i in range(batch_size) if stage_indices[i] == corrected_stage_idx]
 
@@ -98,7 +98,7 @@ def collate_fn(examples, config, noise_scheduler_copy):
         target_list.append(target)
         pos_embed_list.extend([pos_embed] * batch_size_select)
         seq_len_list.extend([seq_len] * batch_size_select)
-        timestep_list.append(Timesteps)
+        timestep_list.append(timesteps)
         input_ids_list.extend(input_ids_select)
 
     pixel_values = torch.cat(sample_list, dim=0).to(memory_format=torch.contiguous_format)

@@ -13,9 +13,9 @@ class PixelFlowScheduler:
         self.num_stages = num_stages
         self.gamma = gamma
 
-        self.Timesteps = torch.linspace(0, num_train_timesteps - 1, num_train_timesteps, dtype=torch.float32)
+        self.timesteps = torch.linspace(0, num_train_timesteps - 1, num_train_timesteps, dtype=torch.float32)
 
-        self.t = self.Timesteps / num_train_timesteps  # normalized time in [0, 1]
+        self.t = self.timesteps / num_train_timesteps  # normalized time in [0, 1]
 
         self.stage_range = [x / num_stages for x in range(num_stages + 1)]
 
@@ -23,7 +23,7 @@ class PixelFlowScheduler:
         self.start_t = torch.zeros(num_stages, dtype=torch.float64)
         self.end_t = torch.zeros(num_stages, dtype=torch.float64)
         self.t_window_per_stage = torch.empty((num_stages, num_train_timesteps), dtype=torch.float64)
-        self.Timesteps_per_stage = torch.empty((num_stages, num_train_timesteps), dtype=torch.float64)
+        self.timesteps_per_stage = torch.empty((num_stages, num_train_timesteps), dtype=torch.float64)
         stage_distance = torch.empty(num_stages, dtype=torch.float64)
 
         # stage_idx = 0: min t, min resolution, most noisy
@@ -53,16 +53,19 @@ class PixelFlowScheduler:
             start_ratio = 0.0 if stage_idx == 0 else (stage_distance_cumsum[stage_idx - 1].item() / total_stage_distance)
             end_ratio = 1.0 if stage_idx == num_stages - 1 else (stage_distance_cumsum[stage_idx].item() / total_stage_distance)
 
-            Timestep_start = self.Timesteps[int(num_train_timesteps * start_ratio)]
-            Timestep_end = self.Timesteps[min(int(num_train_timesteps * end_ratio), num_train_timesteps - 1)]
+            Timestep_start = self.timesteps[int(num_train_timesteps * start_ratio)]
+            Timestep_end = self.timesteps[min(int(num_train_timesteps * end_ratio), num_train_timesteps - 1)]
 
             if stage_idx == num_stages - 1:
-                self.Timesteps_per_stage[stage_idx] = torch.linspace(Timestep_start.item(), Timestep_end.item(), num_train_timesteps, dtype=torch.float64)
+                self.timesteps_per_stage[stage_idx] = torch.linspace(Timestep_start.item(), Timestep_end.item(), num_train_timesteps, dtype=torch.float64)
             else:
-                self.Timesteps_per_stage[stage_idx] = torch.linspace(Timestep_start.item(), Timestep_end.item(), num_train_timesteps + 1, dtype=torch.float64)[:-1]
+                self.timesteps_per_stage[stage_idx] = torch.linspace(Timestep_start.item(), Timestep_end.item(), num_train_timesteps + 1, dtype=torch.float64)[:-1]
+
+    @property
+    def sigmas(self): return self.t
 
     @staticmethod
-    def time_linear_to_Timesteps(t, t_start, t_end, T_start, T_end):
+    def time_linear_to_timesteps(t, t_start, t_end, T_start, T_end):
         """
         linearly map t to T: T = k * t + b
         """
@@ -73,8 +76,8 @@ class PixelFlowScheduler:
     def set_timesteps(self, num_inference_steps, stage_index, device=None, shift=1.0):
         self.num_inference_steps = num_inference_steps
 
-        stage_T_start = self.Timesteps_per_stage[stage_index][0].item()
-        stage_T_end = self.Timesteps_per_stage[stage_index][-1].item()
+        stage_T_start = self.timesteps_per_stage[stage_index][0].item()
+        stage_T_end = self.timesteps_per_stage[stage_index][-1].item()
 
         t_start = self.t_window_per_stage[stage_index][0].item()
         t_end = self.t_window_per_stage[stage_index][-1].item()
@@ -82,8 +85,8 @@ class PixelFlowScheduler:
         t = np.linspace(t_start, t_end, num_inference_steps, dtype=np.float64)
         t = t / (shift  + (1 - shift) * t)
 
-        Timesteps = self.time_linear_to_Timesteps(t, t_start, t_end, stage_T_start, stage_T_end)
-        self.Timesteps = torch.from_numpy(Timesteps).to(device=device)
+        timesteps = self.time_linear_to_timesteps(t, t_start, t_end, stage_T_start, stage_T_end)
+        self.timesteps = torch.from_numpy(timesteps).to(device=device)
 
         self.t = torch.from_numpy(np.append(t, 1.0)).to(device=device, dtype=torch.float64)
         self._step_index = None
