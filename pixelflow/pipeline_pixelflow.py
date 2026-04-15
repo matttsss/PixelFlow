@@ -139,6 +139,122 @@ class PixelFlowPipeline(PyTorchModelHubMixin):
 
         return prompt_embeds, prompt_attention_mask
 
+    def prepare_training_batch(self, pixel_values: torch.FloatTensor, input_ids: List[int] | None = None):
+        if self.patch_size is None or self.head_dim is None or self.num_stages is None:
+            raise ValueError("Pipeline requires scheduler/model metadata (patch_size, head_dim, num_stages) for training batch preparation")
+
+        if pixel_values.ndim != 4:
+            raise ValueError(f"Expected pixel_values to have shape [B, C, H, W], got {tuple(pixel_values.shape)}")
+
+        batch_size = pixel_values.shape[0]
+        if input_ids and len(input_ids) != batch_size:
+            raise ValueError(f"Expected {batch_size} class labels, got {len(input_ids)}")
+
+        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+        orig_height, orig_width = pixel_values.shape[-2:]
+
+        stage_indices = torch.arange(self.num_stages, dtype=torch.int32).repeat(batch_size // self.num_stages + 1)
+        stage_indices = stage_indices[:batch_size]
+        stage_indices = stage_indices[torch.randperm(batch_size)]
+
+        num_train_timesteps = self.scheduler.timesteps_per_stage.shape[1]
+        timestep_indices = torch.randint(0, num_train_timesteps, (batch_size,), dtype=torch.long)
+
+        sample_list, input_ids_list, pos_embed_list, seq_len_list, target_list, timestep_list = [], [], [], [], [], []
+
+        for stage_idx in range(self.num_stages):
+            corrected_stage_idx = self.num_stages - stage_idx - 1
+            stage_mask = stage_indices == corrected_stage_idx
+            if not stage_mask.any():
+                continue
+
+            stage_select_indices = timestep_indices[stage_mask]
+            timesteps = self.scheduler.timesteps_per_stage[corrected_stage_idx][stage_select_indices].float()
+
+            pixel_values_select = pixel_values[stage_mask]
+
+            end_height = orig_height // (2 ** stage_idx)
+            end_width = orig_width // (2 ** stage_idx)
+
+            start_t = self.scheduler.start_t[corrected_stage_idx]
+            end_t = self.scheduler.end_t[corrected_stage_idx]
+
+            pixel_values_end = pixel_values_select
+            pixel_values_start = pixel_values_select
+
+            if stage_idx > 0:
+                for downsample_idx in range(1, stage_idx + 1):
+                    pixel_values_end = F.interpolate(
+                        pixel_values_end,
+                        (orig_height // (2 ** downsample_idx), orig_width // (2 ** downsample_idx)),
+                        mode="bilinear",
+                    )
+
+            for downsample_idx in range(1, stage_idx + 2):
+                pixel_values_start = F.interpolate(
+                    pixel_values_start,
+                    (orig_height // (2 ** downsample_idx), orig_width // (2 ** downsample_idx)),
+                    mode="bilinear",
+                )
+
+            pixel_values_start = F.interpolate(pixel_values_start, (end_height, end_width), mode="nearest")
+
+            noise = torch.randn_like(pixel_values_end)
+            pixel_values_end = end_t * pixel_values_end + (1.0 - end_t) * noise
+            pixel_values_start = start_t * pixel_values_start + (1.0 - start_t) * noise
+            target = pixel_values_end - pixel_values_start
+
+            t_select = self.scheduler.t_window_per_stage[corrected_stage_idx][stage_select_indices].flatten()
+            while t_select.ndim < pixel_values_start.ndim:
+                t_select = t_select.unsqueeze(-1)
+
+            xt = t_select.float() * pixel_values_end + (1.0 - t_select.float()) * pixel_values_start
+
+            target = rearrange(target, 'b c (h ph) (w pw) -> (b h w) (c ph pw)', ph=self.patch_size, pw=self.patch_size)
+            xt = rearrange(xt, 'b c (h ph) (w pw) -> (b h w) (c ph pw)', ph=self.patch_size, pw=self.patch_size)
+
+            pos_embed = get_2d_rotary_pos_embed(
+                embed_dim=self.head_dim,
+                crops_coords=((0, 0), (end_height // self.patch_size, end_width // self.patch_size)),
+                grid_size=(end_height // self.patch_size, end_width // self.patch_size),
+            )
+
+            seq_len = (end_height // self.patch_size) * (end_width // self.patch_size)
+            assert end_height == end_width, f"only support square image, got {seq_len}; TODO: latent_size_list"
+
+            sample_list.append(xt)
+            target_list.append(target)
+            pos_embed_list.extend([pos_embed] * timesteps.shape[0])
+            seq_len_list.extend([seq_len] * timesteps.shape[0])
+            timestep_list.append(timesteps)
+
+            if input_ids is not None:
+                selected_indices = torch.nonzero(stage_mask, as_tuple=False).flatten().tolist()
+                input_ids_select = [input_ids[i] for i in selected_indices]
+                input_ids_list.extend(input_ids_select)
+
+        if not sample_list:
+            raise RuntimeError("No training samples were generated for this batch")
+
+        pixel_values = torch.cat(sample_list, dim=0).to(memory_format=torch.contiguous_format)
+        target_values = torch.cat(target_list, dim=0).to(memory_format=torch.contiguous_format)
+        pos_embed = torch.cat([torch.stack(one_pos_emb, -1) for one_pos_emb in pos_embed_list], dim=0).float()
+        cumsum_q_len = torch.cumsum(torch.tensor([0] + seq_len_list), 0).to(torch.int32)
+        latent_size_list = torch.tensor([int(math.sqrt(seq_len)) for seq_len in seq_len_list], dtype=torch.int32)
+
+        return {
+            "pixel_values": pixel_values,
+            "input_ids": input_ids_list if input_ids is not None else None,
+            "pos_embed": pos_embed,
+            "cumsum_q_len": cumsum_q_len,
+            "batch_latent_size": latent_size_list,
+            "seqlen_list_q": seq_len_list,
+            "cumsum_kv_len": None,
+            "batch_kv_len": None,
+            "timesteps": torch.cat(timestep_list, dim=0),
+            "target_values": target_values,
+        }
+
     def sample_block_noise(self, bs, ch, height, width, eps=1e-6):
         gamma = self.scheduler.gamma
         dist = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(4), torch.eye(4) * (1 - gamma) + torch.ones(4, 4) * gamma + eps * torch.eye(4))

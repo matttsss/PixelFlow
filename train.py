@@ -4,11 +4,13 @@ import argparse
 import copy
 from collections import OrderedDict
 from datetime import datetime
+from types import SimpleNamespace
 from omegaconf import OmegaConf
 import torch
 import torch.distributed as dist
 
 from pixelflow.scheduling_pixelflow import PixelFlowScheduler
+from pixelflow.pipeline_pixelflow import PixelFlowPipeline
 from pixelflow.utils.logger import setup_logger
 from pixelflow.utils import config as config_utils
 from pixelflow.utils.misc import seed_everything
@@ -78,7 +80,13 @@ def main(args):
         num_train_timesteps=config.scheduler.num_train_timesteps,
         num_stages=config.scheduler.num_stages,
     )
-    noise_scheduler_copy = copy.deepcopy(noise_scheduler)
+    collate_pipeline = PixelFlowPipeline(
+        scheduler=noise_scheduler,
+        transformer=SimpleNamespace(
+            patch_size=config.model.params.patch_size,
+            attention_head_dim=config.model.params.attention_head_dim,
+        ),
+    )
 
     if args.pretrained_model is not None:
         ckpt = torch.load(args.pretrained_model, map_location="cpu", weights_only=True)
@@ -87,7 +95,7 @@ def main(args):
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.train.lr, weight_decay=config.train.weight_decay)
-    data_loader, sampler = build_imagenet_loader(config, noise_scheduler_copy)
+    data_loader, sampler = build_imagenet_loader(config, collate_pipeline)
 
     logger.info("***** Running training *****")
     global_step = 0
