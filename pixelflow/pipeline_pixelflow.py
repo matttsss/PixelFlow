@@ -32,9 +32,9 @@ class PixelFlowPipeline(PyTorchModelHubMixin):
         self.class_cond = text_encoder is None or tokenizer is None
         self.scheduler = scheduler
         self.transformer = transformer
-        self.patch_size = transformer.patch_size
-        self.head_dim = transformer.attention_head_dim
-        self.num_stages = scheduler.num_stages
+        self.patch_size = transformer.patch_size if hasattr(transformer, "patch_size") else None
+        self.head_dim = transformer.attention_head_dim if hasattr(transformer, "attention_head_dim") else None
+        self.num_stages = scheduler.num_stages if hasattr(scheduler, "num_stages") else None
 
         self.text_encoder = cpu_offload(text_encoder, "cuda") if text_encoder is not None else None
         self.tokenizer = tokenizer
@@ -300,24 +300,39 @@ class PixelFlowPipeline(PyTorchModelHubMixin):
         dtype = kwargs.get("dtype", torch.float32)
 
         config = OmegaConf.load(f"{model_id}/config.yaml")
-        model = config_utils.instantiate_from_config(config.model)
-
-        ckpt = torch.load(f"{model_id}/model.pt", map_location="cpu", weights_only=True)
-        
-        model.load_state_dict(ckpt, strict=True)
-        model.eval()
-        model.to(device=device, dtype=dtype)
 
         if kwargs.get("text_cond", False):
-            text_encoder = T5EncoderModel.from_pretrained("google/flan-t5-xl").to(device=device, dtype=dtype)
-            tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-xl")
+            text_encoder = (
+                kwargs["text_encoder"] if "text_encoder" in kwargs else 
+                T5EncoderModel.from_pretrained("google/flan-t5-xl").to(device=device, dtype=dtype)
+            )
+            
+            tokenizer = (
+                kwargs["tokenizer"] if "tokenizer" in kwargs else 
+                AutoTokenizer.from_pretrained("google/flan-t5-xl")
+            )
         else:
             text_encoder = None
             tokenizer = None
         
+        scheduler = (
+            kwargs["scheduler"] if "scheduler" in kwargs else 
+            PixelFlowScheduler(config.scheduler.num_train_timesteps, num_stages=config.scheduler.num_stages, gamma=-1/3)
+        )
+
+        if "transformer" in kwargs:
+            transformer = kwargs["transformer"]
+        else:
+            transformer = config_utils.instantiate_from_config(config.model)
+            ckpt = torch.load(f"{model_id}/model.pt", map_location="cpu", weights_only=True)
+            
+            transformer.load_state_dict(ckpt, strict=True)
+            transformer.eval()
+            transformer.to(device=device, dtype=dtype)
+
         return cls(
-            scheduler=PixelFlowScheduler(config.scheduler.num_train_timesteps, num_stages=config.scheduler.num_stages, gamma=-1/3),
-            transformer=model,
+            scheduler=scheduler,
+            transformer=transformer,
             text_encoder=text_encoder,
             tokenizer=tokenizer,
             max_token_length=config.get("max_token_length", 512),
