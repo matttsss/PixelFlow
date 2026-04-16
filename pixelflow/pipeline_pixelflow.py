@@ -139,12 +139,20 @@ class PixelFlowPipeline(PyTorchModelHubMixin):
 
         return prompt_embeds, prompt_attention_mask
 
-    def prepare_training_batch(self, pixel_values: torch.FloatTensor, input_ids: List[int] | None = None):
+    def prepare_training_batch(self, pixel_values: torch.FloatTensor,
+                               input_ids: List[int] | None = None,
+                               share_time: bool = False,
+                               min_time: float = 0.0, max_time: float = 1.0) -> dict[str, torch.Tensor]:
         if self.patch_size is None or self.head_dim is None or self.num_stages is None:
             raise ValueError("Pipeline requires scheduler/model metadata (patch_size, head_dim, num_stages) for training batch preparation")
 
         if pixel_values.ndim != 4:
             raise ValueError(f"Expected pixel_values to have shape [B, C, H, W], got {tuple(pixel_values.shape)}")
+
+        if not (0.0 <= min_time <= 1.0 and 0.0 <= max_time <= 1.0):
+            raise ValueError(f"Expected min_time and max_time to be in [0, 1], got min_time={min_time}, max_time={max_time}")
+        if min_time > max_time:
+            raise ValueError(f"Expected min_time <= max_time, got min_time={min_time}, max_time={max_time}")
 
         batch_size = pixel_values.shape[0]
         if input_ids and len(input_ids) != batch_size:
@@ -153,12 +161,30 @@ class PixelFlowPipeline(PyTorchModelHubMixin):
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
         orig_height, orig_width = pixel_values.shape[-2:]
 
-        stage_indices = torch.arange(self.num_stages, dtype=torch.int32).repeat(batch_size // self.num_stages + 1)
-        stage_indices = stage_indices[:batch_size]
-        stage_indices = stage_indices[torch.randperm(batch_size)]
-
         num_train_timesteps = self.scheduler.timesteps_per_stage.shape[1]
-        timestep_indices = torch.randint(0, num_train_timesteps, (batch_size,), dtype=torch.long)
+        total_train_slots = self.num_stages * num_train_timesteps
+
+        if min_time == max_time:
+            # Map an exact normalized time to the nearest discrete stage/timestep slot.
+            flat_indices = torch.full(
+                (batch_size,),
+                fill_value=min(int(round(min_time * (total_train_slots - 1))), total_train_slots - 1),
+                dtype=torch.long,
+            )
+        else:
+            min_flat_index = int(math.floor(min_time * total_train_slots))
+            max_flat_index_exclusive = int(math.ceil(max_time * total_train_slots))
+
+            min_flat_index = max(0, min(min_flat_index, total_train_slots - 1))
+            max_flat_index_exclusive = max(min_flat_index + 1, min(max_flat_index_exclusive, total_train_slots))
+
+            num_idx_samples = 1 if share_time else batch_size
+            flat_indices = torch.randint(min_flat_index, max_flat_index_exclusive, (num_idx_samples,), dtype=torch.long)
+            if share_time:
+                flat_indices = flat_indices.expand(batch_size)
+
+        stage_indices = flat_indices // num_train_timesteps
+        timestep_indices = flat_indices % num_train_timesteps
 
         sample_list, input_ids_list, pos_embed_list, seq_len_list, target_list, timestep_list = [], [], [], [], [], []
 
@@ -199,24 +225,28 @@ class PixelFlowPipeline(PyTorchModelHubMixin):
 
             pixel_values_start = F.interpolate(pixel_values_start, (end_height, end_width), mode="nearest")
 
+
             noise = torch.randn_like(pixel_values_end)
             pixel_values_end = end_t * pixel_values_end + (1.0 - end_t) * noise
             pixel_values_start = start_t * pixel_values_start + (1.0 - start_t) * noise
             target = pixel_values_end - pixel_values_start
 
             t_select = self.scheduler.t_window_per_stage[corrected_stage_idx][stage_select_indices].flatten()
+            
             while t_select.ndim < pixel_values_start.ndim:
                 t_select = t_select.unsqueeze(-1)
 
             xt = t_select.float() * pixel_values_end + (1.0 - t_select.float()) * pixel_values_start
 
-            target = rearrange(target, 'b c (h ph) (w pw) -> (b h w) (c ph pw)', ph=self.patch_size, pw=self.patch_size)
-            xt = rearrange(xt, 'b c (h ph) (w pw) -> (b h w) (c ph pw)', ph=self.patch_size, pw=self.patch_size)
+            # TODO sort this out
+            # target = rearrange(target, 'b c (h ph) (w pw) -> (b h w) (c ph pw)', ph=self.patch_size, pw=self.patch_size)
+            # xt = rearrange(xt, 'b c (h ph) (w pw) -> (b h w) (c ph pw)', ph=self.patch_size, pw=self.patch_size)
 
             pos_embed = get_2d_rotary_pos_embed(
                 embed_dim=self.head_dim,
                 crops_coords=((0, 0), (end_height // self.patch_size, end_width // self.patch_size)),
                 grid_size=(end_height // self.patch_size, end_width // self.patch_size),
+                output_type="pt"
             )
 
             seq_len = (end_height // self.patch_size) * (end_width // self.patch_size)
